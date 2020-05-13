@@ -1,0 +1,10 @@
+**/*.o
+**/*.gch
+**/*.a
+**/*.dll
+**/Makefile
+**/CMakeCache.txt
+**/.vs
+src/build
+**/build
+**/winbuild
