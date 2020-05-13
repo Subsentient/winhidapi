@@ -137,21 +137,12 @@ struct hid_device_
 
 static hid_device *new_hid_device()
 {
-	hid_device *dev = (hid_device*) calloc(1, sizeof(hid_device));
+	hid_device *dev = (hid_device*) calloc(1, sizeof(hid_device)); //Zeroed out
 
 	assert(dev);
 
 	FLOWTRACE;
-	dev->device_handle = INVALID_HANDLE_VALUE;
-	dev->blocking = TRUE;
-	dev->output_report_length = 0;
-	dev->input_report_length = 0;
-	dev->last_error_str = NULL;
-	dev->last_error_num = 0;
-	dev->read_pending = FALSE;
-	dev->read_buf = NULL;
-	DEBUGMSG("Performing memset");
-	memset(&dev->ol, 0, sizeof(dev->ol));
+
 	dev->ol.hEvent = CreateEvent(NULL, FALSE, FALSE /*initial state f=nonsignaled*/, NULL);
 
 	return dev;
@@ -174,7 +165,7 @@ static void free_hid_device(hid_device *dev)
 
 static void register_error(hid_device *dev, const char *op)
 {
-	WCHAR *ptr = NULL, *msg = NULL;
+	WCHAR *msg = NULL;
 
 	FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER |
 				   FORMAT_MESSAGE_FROM_SYSTEM |
@@ -187,16 +178,9 @@ static void register_error(hid_device *dev, const char *op)
 
 	/* Get rid of the CR and LF that FormatMessage() sticks at the
 	   end of the message. Thanks Microsoft! */
-	ptr = msg;
-	while (*ptr)
-	{
-		if (*ptr == '\r')
-		{
-			*ptr = 0x0000;
-			break;
-		}
-		ptr++;
-	}
+	WCHAR *const Search = wcschr(msg, '\r');
+	
+	if (Search) *Search = L'\0';
 
 	/* Store the message off in the Device entry so that
 	   the hid_error() function can pick it up. */
@@ -262,10 +246,6 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 	
 	SP_DEVINFO_DATA devinfo_data{};
 	SP_DEVICE_INTERFACE_DATA device_interface_data{};
-	HDEVINFO device_info_set = INVALID_HANDLE_VALUE;
-	
-	int device_index = 0;
-	int i = 0;
 	
 	FLOWTRACE;
 	
@@ -282,15 +262,14 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 
 	/* Get information for all the devices belonging to the HID class. */
 	FLOWTRACE;
-	device_info_set = SetupDiGetClassDevsA(&InterfaceClassGuid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+	
+	HDEVINFO device_info_set = SetupDiGetClassDevsA(&InterfaceClassGuid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
 
 	/* Iterate over each device in the HID class, looking for the right one. */
 
-	for (;;)
+	for (int device_index = 0; ; ++device_index)
 	{
-		HANDLE write_handle = INVALID_HANDLE_VALUE;
 		DWORD required_size = 0;
-		HIDD_ATTRIBUTES attrib{};
 
 		DEBUGMSG("Enumerating a device");
 
@@ -341,14 +320,14 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 		{
 			/* register_error(dev, "Unable to call SetupDiGetDeviceInterfaceDetail");
 			   Continue to the next device. */
-			goto cont;
+			continue;
 		}
 
 		/* Make sure this device is of Setup Class "HIDClass" and has a
 		   driver bound to it. */
-		for (i = 0; ; i++)
+		for (int i = 0; ; i++)
 		{
-			char driver_name[256] = { 0 };
+			char driver_name[512] = { 0 };
 
 			/* Populate devinfo_data. This function will return failure
 			   when there are no more interfaces left. */
@@ -357,16 +336,16 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 			res = SetupDiEnumDeviceInfo(device_info_set, i, &devinfo_data);
 			if (!res)
 			{
-				goto cont;
+				continue;
 			}
 
 			FLOWTRACE;
 			res = SetupDiGetDeviceRegistryPropertyA(device_info_set, &devinfo_data,
-													SPDRP_CLASS, NULL, (PBYTE)driver_name, sizeof(driver_name), NULL);
+													SPDRP_CLASS, NULL, (PBYTE)driver_name, sizeof(driver_name) - 1, NULL); //-1 because I don't trust Win32 functions, been burned before.
 			if (!res)
 			{
 				FLOWTRACE;
-				goto cont;
+				continue;
 			}
 
 			if ((strcmp(driver_name, "HIDClass") == 0) ||
@@ -375,8 +354,11 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 			{
 				/* See if there's a driver bound. */
 				FLOWTRACE;
+				
+				memset(driver_name, 0, sizeof driver_name);
+				
 				res = SetupDiGetDeviceRegistryPropertyA(device_info_set, &devinfo_data,
-														SPDRP_DRIVER, NULL, (PBYTE)driver_name, sizeof(driver_name), NULL);
+														SPDRP_DRIVER, NULL, (PBYTE)driver_name, sizeof(driver_name) - 1, NULL);
 				if (res)
 				{
 					break;
@@ -390,19 +372,30 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 
 		/* Open a handle to the device */
 		DEBUGMSG("Opening device");
+		
+		std::unique_ptr<uint8_t, void(*)(uint8_t*)> write_handle_
+		{ //I know, I know, it's annoying.
+			(uint8_t*)open_device(device_interface_detail_data->DevicePath, FALSE),
+			(void(*)(uint8_t*))&CloseHandle
+		};
 
-		write_handle = open_device(device_interface_detail_data->DevicePath, FALSE);
-
+		HANDLE write_handle = (HANDLE)write_handle_.get();
+		
 		/* Check validity of write_handle. */
-		if (write_handle == INVALID_HANDLE_VALUE)
+		if (!write_handle)
 		{
+			write_handle_.release(); //Don't trust CloseHandle() not to freak at a null pointer.
+			
 			/* Unable to open the device. */
 			//register_error(dev, "CreateFile");
 			DEBUGMSG("Failed to open");
-			goto cont_close;
+			
+			continue;
 		}
 
 		DEBUGMSG("Success");
+
+		HIDD_ATTRIBUTES attrib{};
 
 		/* Get the Vendor ID and Product ID for this device. */
 		attrib.Size = sizeof(HIDD_ATTRIBUTES);
@@ -419,16 +412,15 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 				(product_id == 0x0 || attrib.ProductID == product_id))
 		{
 
-			constexpr size_t WSTR_LEN = 512;
+			constexpr size_t WSTR_LEN = 2048;
 			
 			PHIDP_PREPARSED_DATA pp_data = nullptr;
 			HIDP_CAPS caps{};
 			BOOLEAN res = false;
 			NTSTATUS nt_res{};
-			wchar_t wstr[WSTR_LEN]{}; /* TODO: Determine Size */
 
 			/* VID/PID match. Create the record. */
-			struct hid_device_info *const tmp = new hid_device_info{};
+			struct hid_device_info *const tmp = (hid_device_info*)calloc(1, sizeof(*tmp));
 
 			assert(tmp);
 
@@ -466,41 +458,49 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 			{
 				const size_t len = strlen(str);
 				cur_dev->path = (char*) calloc(len + 1, sizeof(char));
+				
 				assert(cur_dev->path);
 
-				strncpy(cur_dev->path, str, len + 1);
-				cur_dev->path[len] = '\0';
+				strncpy(cur_dev->path, str, len); //Guy said he knew how to use strncpy()... Apparently he didn't. Used to be len + 1. Lol.
 			}
 			else
 			{
 				cur_dev->path = NULL;
 			}
 
+			wchar_t wstr[WSTR_LEN]{}; /* TODO: Determine Size */
+
 			/* Serial Number */
-			wstr[0] = 0x0000;
 			FLOWTRACE;
-			res = HidD_GetSerialNumberString(write_handle, wstr, sizeof(wstr));
-			wstr[WSTR_LEN - 1] = 0x0000;
+
+			memset(wstr, 0, sizeof wstr);
+
+			res = HidD_GetSerialNumberString(write_handle, wstr, sizeof(wstr) - 1);
+			
 			if (res)
 			{
 				cur_dev->serial_number = _wcsdup(wstr);
 			}
 
 			/* Manufacturer String */
-			wstr[0] = 0x0000;
 			FLOWTRACE;
-			res = HidD_GetManufacturerString(write_handle, wstr, sizeof(wstr));
-			wstr[WSTR_LEN - 1] = 0x0000;
+
+			memset(wstr, 0, sizeof wstr);
+
+			res = HidD_GetManufacturerString(write_handle, wstr, sizeof(wstr) - 1);
+			
 			if (res)
 			{
 				cur_dev->manufacturer_string = _wcsdup(wstr);
 			}
 
 			/* Product String */
-			wstr[0] = 0x0000;
 			FLOWTRACE;
-			res = HidD_GetProductString(write_handle, wstr, sizeof(wstr));
-			wstr[WSTR_LEN - 1] = 0x0000;
+			
+			memset(wstr, 0, sizeof wstr);
+			
+			res = HidD_GetProductString(write_handle, wstr, sizeof(wstr) - 1);
+			
 			if (res)
 			{
 				cur_dev->product_string = _wcsdup(wstr);
@@ -536,14 +536,6 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 			}
 			FLOWTRACE;
 		}
-
-	cont_close:
-		FLOWTRACE;
-		CloseHandle(write_handle);
-	cont:
-		/* We no longer need the detail data. It can be freed */
-
-		device_index++;
 
 	}
 
