@@ -581,7 +581,6 @@ HID_API_EXPORT hid_device * HID_API_CALL hid_open(unsigned short vendor_id, unsi
 	hid_device *handle = NULL;
 
 	devs = hid_enumerate(vendor_id, product_id);
-	assert(devs);
 
 	cur_dev = devs;
 	while (cur_dev)
