@@ -8,3 +8,6 @@
 src/build
 **/build
 **/winbuild
+msvc/**/Release
+msvc/**/Debug
+msvc/**/x64

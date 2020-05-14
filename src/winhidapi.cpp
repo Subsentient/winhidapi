@@ -25,58 +25,37 @@
 #endif //__PRETTY_FUNCTION__
 
 #ifdef DEBUG
-#define DEBUGMSG(Msg) fprintf(stderr, "%s:%s:%d thread %lu: %s\n", __FILE__, __PRETTY_FUNCTION__, __LINE__, GetCurrentThreadId(), Msg)
-#define FLOWTRACE	fprintf(stderr, "Executing %s:%s():%d in thread %lu\n", __FILE__, __PRETTY_FUNCTION__, __LINE__, GetCurrentThreadId())
+#include <iostream>
+#define DEBUGMSG(Msg) (std::cerr << __FILE__ << ":" << __PRETTY_FUNCTION__ << "():" << __LINE__ << " thread " << GetCurrentThreadId() << ": " << Msg << std::endl)
+#define FLOWTRACE	(std::cerr << "Executing " << __FILE__ << ":" << __PRETTY_FUNCTION__ << "():" << __LINE__ << " in thread " << GetCurrentThreadId() << std::endl)
 #else
 #define DEBUGMSG(Msg)
 #define FLOWTRACE
 #endif //DEBUG
 
-#include <windows.h>
-
-
 #include <memory>
 #include <vector>
+
 extern "C" {
-	
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <windows.h>
+
 #include <assert.h>
-#ifndef _NTDEF_
-typedef LONG NTSTATUS;
-#endif
+#include <setupapi.h>
+#include <winioctl.h>
 
-#ifdef __MINGW32__
-#include <ntdef.h>
-#include <winbase.h>
-#endif
+#include "hidapi.h"
 
-#ifdef __CYGWIN__
-#include <ntdef.h>
-#define _wcsdup wcsdup
-#endif
+
 
 /* The maximum number of characters that can be passed into the
    HidD_Get*String() functions without it failing.*/
 #define MAX_STRING_WCHARS 0xFFF
 
-/*#define HIDAPI_USE_DDK*/
-
-
-#include <setupapi.h>
-#include <winioctl.h>
-
-	/* Copied from inc/ddk/hidclass.h, part of the Windows DDK. */
-#define HID_OUT_CTL_CODE(id)  \
-	CTL_CODE(FILE_DEVICE_KEYBOARD, (id), METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
-#define IOCTL_HID_GET_FEATURE                   HID_OUT_CTL_CODE(100)
-#define IOCTL_HID_GET_INPUT_REPORT              HID_OUT_CTL_CODE(104)
-
-
-
-#include <stdio.h>
-#include <stdlib.h>
-
-
-#include "hidapi.h"
+#define HID_GET_FEATURE (CTL_CODE(FILE_DEVICE_KEYBOARD, 100, METHOD_OUT_DIRECT, FILE_ANY_ACCESS))
+#define HID_GET_INPUT_REPORT (CTL_CODE(FILE_DEVICE_KEYBOARD, 104, METHOD_OUT_DIRECT, FILE_ANY_ACCESS))
 
 #undef MIN
 #define MIN(x,y) ((x) < (y)? (x): (y))
@@ -178,7 +157,7 @@ static void register_error(hid_device *dev, const char *op)
 
 	/* Get rid of the CR and LF that FormatMessage() sticks at the
 	   end of the message. Thanks Microsoft! */
-	WCHAR *const Search = wcschr(msg, '\r');
+	WCHAR *const Search = wcschr(msg, L'\r');
 	
 	if (Search) *Search = L'\0';
 
@@ -368,8 +347,6 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 			FLOWTRACE;
 		}
 
-		//wprintf(L"HandleName: %s\n", device_interface_detail_data->DevicePath);
-
 		/* Open a handle to the device */
 		DEBUGMSG("Opening device");
 		
@@ -461,7 +438,7 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 				
 				assert(cur_dev->path);
 
-				strncpy(cur_dev->path, str, len); //Guy said he knew how to use strncpy()... Apparently he didn't. Used to be len + 1. Lol.
+				memcpy(cur_dev->path, str, len); //Guy said he knew how to use strncpy()... Apparently he didn't. Used to be len + 1. Lol.
 			}
 			else
 			{
@@ -732,7 +709,7 @@ int HID_API_EXPORT HID_API_CALL hid_write(hid_device *dev, const unsigned char *
 
 	res = GetOverlappedResult(dev->device_handle, ol.get(), &bytes_written, TRUE/*wait*/);
 
-	DEBUGMSG(res ? "Success" : "Failure");
+	DEBUGMSG((const char*)(res ? "Success" : "Failure"));
 	
 	if (!res)
 	{
@@ -795,7 +772,8 @@ int HID_API_EXPORT HID_API_CALL hid_read_timeout(hid_device *dev, unsigned char 
 	   data has been copied to the data[] array which was passed to ReadFile(). */
 	DEBUGMSG("Calling GetOverlappedResult()");
 	res = GetOverlappedResult(dev->device_handle, &dev->ol, &bytes_read, TRUE/*wait*/);
-	DEBUGMSG(res ? "Success" : "Failure");
+	DEBUGMSG((const char*)(res ? "Success" : "Failure"));
+
 	/* Set pending back to false, even if GetOverlappedResult() returned error. */
 	dev->read_pending = FALSE;
 
@@ -865,7 +843,7 @@ int HID_API_EXPORT HID_API_CALL hid_get_feature_report(hid_device *dev, unsigned
 	FLOWTRACE;
 	
 	BOOL res = DeviceIoControl(	dev->device_handle,
-								IOCTL_HID_GET_FEATURE,
+								HID_GET_FEATURE,
 								data, length,
 								data, length,
 								&bytes_returned, ol.get());
@@ -888,7 +866,7 @@ int HID_API_EXPORT HID_API_CALL hid_get_feature_report(hid_device *dev, unsigned
 	
 	res = GetOverlappedResult(dev->device_handle, ol.get(), &bytes_returned, TRUE/*wait*/);
 	
-	DEBUGMSG(res ? "Success" : "Failure");
+	DEBUGMSG((const char*)(res ? "Success" : "Failure"));
 	
 	if (!res)
 	{
@@ -912,7 +890,7 @@ int HID_API_EXPORT HID_API_CALL hid_get_input_report(hid_device *dev, unsigned c
 	std::unique_ptr<OVERLAPPED> ol { new OVERLAPPED{} };
 	
 	BOOL res = DeviceIoControl(	dev->device_handle,
-								IOCTL_HID_GET_INPUT_REPORT,
+								HID_GET_INPUT_REPORT,
 								data, length,
 								data, length,
 								&bytes_returned, ol.get());
@@ -933,7 +911,7 @@ int HID_API_EXPORT HID_API_CALL hid_get_input_report(hid_device *dev, unsigned c
 	
 	res = GetOverlappedResult(dev->device_handle, ol.get(), &bytes_returned, TRUE/*wait*/);
 	
-	DEBUGMSG(res ? "Success" : "Failure");
+	DEBUGMSG((const char*)(res ? "Success" : "Failure"));
 
 	if (!res)
 	{
