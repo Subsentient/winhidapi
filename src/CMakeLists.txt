@@ -4,7 +4,7 @@ project("WinHIDAPI")
 
 if (DEBUG)
 	add_compile_options(-std=gnu++14 -pedantic -Wall -DDEBUG -O0 -g3 -fcf-protection=full -fstack-protector-all -fstack-clash-protection)
-	add_link_options(-fstack-check -fstack-clash-protection -fstack-protector-all)
+	add_link_options(-fstack-clash-protection -fstack-protector-all -fcf-protection=full)
 else()
 	add_compile_options(-std=gnu++14 -pedantic -Wall -Ofast)
 endif()

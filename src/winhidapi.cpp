@@ -34,6 +34,7 @@
 #endif //DEBUG
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 extern "C" {
@@ -60,6 +61,7 @@ extern "C" {
 #undef MIN
 #define MIN(x,y) ((x) < (y)? (x): (y))
 
+#define DEVLOCK std::unique_lock<std::recursive_mutex> _DEVLOCK { *dev->devlock };
 
 /* Since we're not building with the DDK, and the HID header
    files aren't part of the SDK, we have to define all this
@@ -104,6 +106,7 @@ BOOLEAN __stdcall HidD_SetNumInputBuffers(HANDLE handle, ULONG number_buffers);
 struct hid_device_
 {
 	HANDLE device_handle;
+	std::recursive_mutex *devlock;
 	BOOL blocking;
 	USHORT output_report_length;
 	size_t input_report_length;
@@ -123,13 +126,22 @@ static hid_device *new_hid_device()
 	FLOWTRACE;
 
 	dev->ol.hEvent = CreateEvent(NULL, FALSE, FALSE /*initial state f=nonsignaled*/, NULL);
-
+	dev->devlock = new std::recursive_mutex;
+	
 	return dev;
 }
 
 static void free_hid_device(hid_device *dev)
 {
 	FLOWTRACE;
+	
+	DEVLOCK;
+	
+	if (dev->device_handle)
+	{
+		CancelIoEx(dev->device_handle, nullptr);
+	}
+	
 	CloseHandle(dev->ol.hEvent);
 	FLOWTRACE;
 	CloseHandle(dev->device_handle);
@@ -138,12 +150,20 @@ static void free_hid_device(hid_device *dev)
 	FLOWTRACE;
 	free(dev->read_buf);
 	FLOWTRACE;
+	
+	_DEVLOCK.release();
+	
+	delete dev->devlock;
+	
+	FLOWTRACE;
 	free(dev);
 	DEBUGMSG("Free successful");
 }
 
 static void register_error(hid_device *dev, const char *op)
 {
+	DEVLOCK;
+	
 	WCHAR *msg = NULL;
 
 	FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER |
@@ -198,6 +218,9 @@ int HID_API_EXPORT hid_init(void)
 	
 	if (!Initialized)
 	{
+#ifdef _MSC_VER
+		_CrtSetDbgFlag(_CRTDBG_CHECK_ALWAYS_DF | _CRTDBG_DELAY_FREE_MEM_DF);
+#endif
 		freopen("hidlog.txt", "wb", stderr);
 
 		setvbuf(stdout, NULL, _IONBF, 0);
@@ -599,6 +622,7 @@ HID_API_EXPORT hid_device * HID_API_CALL hid_open_path(const char *path)
 	hid_device *const dev = new_hid_device();
 	
 	if (!dev) return NULL;
+	DEVLOCK;
 	
 	HIDP_CAPS caps{};
 	PHIDP_PREPARSED_DATA pp_data = nullptr;
@@ -678,6 +702,8 @@ int HID_API_EXPORT HID_API_CALL hid_write(hid_device *dev, const unsigned char *
 {
 	DEBUGMSG("Entered");
 
+	DEVLOCK;
+	
 	DWORD bytes_written = 0;
 
 	std::unique_ptr<OVERLAPPED> ol { new OVERLAPPED{} };
@@ -692,15 +718,12 @@ int HID_API_EXPORT HID_API_CALL hid_write(hid_device *dev, const unsigned char *
 	
 	BOOL res = WriteFile(dev->device_handle, Buf.data(), Buf.size(), nullptr, ol.get());
 
-	if (!res)
+	if (!res && GetLastError() != ERROR_IO_PENDING)
 	{
-		if (GetLastError() != ERROR_IO_PENDING)
-		{
-			/* WriteFile() failed. Return error. */
-			DEBUGMSG("Error writing");
-			register_error(dev, "WriteFile");
-			return -1;
-		}
+		/* WriteFile() failed. Return error. */
+		DEBUGMSG("Error writing");
+		register_error(dev, "WriteFile");
+		return -1;
 	}
 
 	/* Wait here until the write is done. This makes
@@ -730,6 +753,8 @@ int HID_API_EXPORT HID_API_CALL hid_read_timeout(hid_device *dev, unsigned char 
 	size_t copy_len = 0;
 	BOOL res = false;
 
+	DEVLOCK;
+	
 	/* Copy the handle for convenience. */
 	HANDLE ev = dev->ol.hEvent;
 
@@ -748,7 +773,7 @@ int HID_API_EXPORT HID_API_CALL hid_read_timeout(hid_device *dev, unsigned char 
 			/* ReadFile() has failed.
 			   Clean up and return error. */
 			DEBUGMSG("Read timeout");
-			CancelIo(dev->device_handle);
+			CancelIoEx(dev->device_handle, nullptr);
 			dev->read_pending = FALSE;
 			goto end_of_function;
 		}
@@ -814,6 +839,8 @@ int HID_API_EXPORT HID_API_CALL hid_read(hid_device *dev, unsigned char *data, s
 
 int HID_API_EXPORT HID_API_CALL hid_set_nonblocking(hid_device *dev, int nonblock)
 {
+	DEVLOCK;
+	
 	assert(dev);
 
 	dev->blocking = !nonblock;
@@ -823,6 +850,9 @@ int HID_API_EXPORT HID_API_CALL hid_set_nonblocking(hid_device *dev, int nonbloc
 int HID_API_EXPORT HID_API_CALL hid_send_feature_report(hid_device *dev, const unsigned char *data, size_t length)
 {
 	FLOWTRACE;
+
+	DEVLOCK;
+	
 	const BOOL res = HidD_SetFeature(dev->device_handle, (PVOID)data, length);
 	if (!res)
 	{
@@ -841,6 +871,8 @@ int HID_API_EXPORT HID_API_CALL hid_get_feature_report(hid_device *dev, unsigned
 	std::unique_ptr<OVERLAPPED> ol { new OVERLAPPED{} };
 	
 	FLOWTRACE;
+	
+	DEVLOCK;
 	
 	BOOL res = DeviceIoControl(	dev->device_handle,
 								HID_GET_FEATURE,
@@ -886,8 +918,10 @@ int HID_API_EXPORT HID_API_CALL hid_get_feature_report(hid_device *dev, unsigned
 int HID_API_EXPORT HID_API_CALL hid_get_input_report(hid_device *dev, unsigned char *data, size_t length)
 {
 	DWORD bytes_returned = 0;
-
+	
 	std::unique_ptr<OVERLAPPED> ol { new OVERLAPPED{} };
+	
+	DEVLOCK;
 	
 	BOOL res = DeviceIoControl(	dev->device_handle,
 								HID_GET_INPUT_REPORT,
@@ -934,7 +968,10 @@ void HID_API_EXPORT HID_API_CALL hid_close(hid_device *dev)
 	}
 
 	FLOWTRACE;
-	CancelIo(dev->device_handle);
+	DEVLOCK;
+	CancelIoEx(dev->device_handle, nullptr);
+	_DEVLOCK.unlock();
+	
 	free_hid_device(dev);
 }
 
@@ -942,6 +979,8 @@ int HID_API_EXPORT_CALL HID_API_CALL hid_get_manufacturer_string(hid_device *dev
 {
 	FLOWTRACE;
 
+	DEVLOCK;
+	
 	const BOOL res = HidD_GetManufacturerString(dev->device_handle, string, sizeof(wchar_t) * MIN(maxlen, MAX_STRING_WCHARS));
 	if (!res)
 	{
@@ -955,6 +994,9 @@ int HID_API_EXPORT_CALL HID_API_CALL hid_get_manufacturer_string(hid_device *dev
 int HID_API_EXPORT_CALL HID_API_CALL hid_get_product_string(hid_device *dev, wchar_t *string, size_t maxlen)
 {
 	FLOWTRACE;
+	
+	DEVLOCK;
+	
 	const BOOL res = HidD_GetProductString(dev->device_handle, string, sizeof(wchar_t) * MIN(maxlen, MAX_STRING_WCHARS));
 	if (!res)
 	{
@@ -968,6 +1010,9 @@ int HID_API_EXPORT_CALL HID_API_CALL hid_get_product_string(hid_device *dev, wch
 int HID_API_EXPORT_CALL HID_API_CALL hid_get_serial_number_string(hid_device *dev, wchar_t *string, size_t maxlen)
 {
 	FLOWTRACE;
+	
+	DEVLOCK;
+	
 	const BOOL res = HidD_GetSerialNumberString(dev->device_handle, string, sizeof(wchar_t) * MIN(maxlen, MAX_STRING_WCHARS));
 	if (!res)
 	{
@@ -981,6 +1026,9 @@ int HID_API_EXPORT_CALL HID_API_CALL hid_get_serial_number_string(hid_device *de
 int HID_API_EXPORT_CALL HID_API_CALL hid_get_indexed_string(hid_device *dev, int string_index, wchar_t *string, size_t maxlen)
 {
 	FLOWTRACE;
+	
+	DEVLOCK;
+	
 	const BOOL res = HidD_GetIndexedString(dev->device_handle, string_index, string, sizeof(wchar_t) * MIN(maxlen, MAX_STRING_WCHARS));
 	if (!res)
 	{
@@ -996,6 +1044,7 @@ HID_API_EXPORT const wchar_t * HID_API_CALL  hid_error(hid_device *dev)
 {
 	if (dev)
 	{
+		DEVLOCK;
 		if (dev->last_error_str == NULL)
 		{
 			return L"Success";
