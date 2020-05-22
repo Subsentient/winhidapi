@@ -102,6 +102,9 @@ BOOLEAN __stdcall HidD_FreePreparsedData(PHIDP_PREPARSED_DATA preparsed_data);
 NTSTATUS __stdcall HidP_GetCaps(PHIDP_PREPARSED_DATA preparsed_data, HIDP_CAPS *caps);
 BOOLEAN __stdcall HidD_SetNumInputBuffers(HANDLE handle, ULONG number_buffers);
 
+#ifndef _MSC_VER
+BOOL __stdcall CancelIoEx(HANDLE, LPOVERLAPPED);
+#endif
 
 struct hid_device_
 {
